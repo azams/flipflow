@@ -11,8 +11,9 @@ from javax.swing import (
     JSplitPane, JTabbedPane, JTable, JOptionPane, JComboBox, JCheckBox,
     JDialog, JMenu, JMenuItem, JPopupMenu, JFileChooser, BorderFactory, DefaultListModel,
     ListSelectionModel, SwingConstants, SwingUtilities, BoxLayout,
-    AbstractListModel, Box
+    AbstractListModel, Box, JTree, TransferHandler, DropMode, UIManager
 )
+from javax.swing.tree import DefaultTreeModel, DefaultMutableTreeNode, TreeSelectionModel, TreePath, DefaultTreeCellRenderer
 from javax.swing.filechooser import FileNameExtensionFilter
 from javax.swing.table import DefaultTableModel, AbstractTableModel
 from javax.swing.event import ListSelectionListener
@@ -61,17 +62,12 @@ AUTO_DETECT_TOKENS = [
     "api_key", "apikey", "nonce"
 ]
 
-# Colors for UI
-COLOR_BG = Color(43, 43, 43)
-COLOR_BG_LIGHT = Color(60, 63, 65)
-COLOR_BG_PANEL = Color(49, 51, 53)
-COLOR_FG = Color(187, 187, 187)
-COLOR_FG_DIM = Color(130, 130, 130)
-COLOR_ACCENT = Color(75, 110, 175)
-COLOR_SUCCESS = Color(80, 160, 80)
-COLOR_ERROR = Color(200, 80, 80)
-COLOR_WARNING = Color(200, 170, 60)
-COLOR_BORDER = Color(70, 70, 70)
+# Colors for UI (Try to follow Burp theme)
+COLOR_BG = UIManager.getColor("Panel.background") or Color(255, 255, 255)
+COLOR_FG = UIManager.getColor("Label.foreground") or Color(0, 0, 0)
+COLOR_ACCENT = UIManager.getColor("List.selectionBackground") or Color(75, 110, 175)
+COLOR_FG_SELECTED = UIManager.getColor("List.selectionForeground") or Color(255, 255, 255)
+COLOR_BORDER = UIManager.getColor("Separator.foreground") or Color(200, 200, 200)
 
 FONT_MONO = Font("Monospaced", Font.PLAIN, 12)
 FONT_UI = Font("SansSerif", Font.PLAIN, 12)
@@ -182,6 +178,7 @@ class WorkflowModel(object):
         self.name = name
         self.steps = steps or []
         self.description = description
+        self._rel_path = ""
 
     def to_dict(self):
         return {
@@ -582,11 +579,23 @@ class ExecutionEngine(object):
 # WORKFLOW MANAGER (Persistence)
 # =============================================================================
 
+class FolderNode(object):
+    """Represents a category/folder in the workflow hierarchy."""
+    def __init__(self, name, rel_path, parent=None):
+        self.name = name
+        self._rel_path = rel_path
+        self.parent = parent
+        self.children = [] # List of FolderNode or WorkflowModel
+
+    def is_folder(self): return True
+    def __str__(self): return self.name
+
+
 class WorkflowManager(object):
-    """CRUD operations and JSON persistence for workflows."""
+    """Hierarchical storage for workflows using system directories."""
 
     def __init__(self):
-        self._workflows = []
+        self._root = FolderNode("Root", "")
         self._listeners = []
         self._ensure_storage_dir()
         self.load_all()
@@ -596,83 +605,135 @@ class WorkflowManager(object):
             os.makedirs(STORAGE_DIR)
 
     def load_all(self):
-        self._workflows = []
-        if not os.path.exists(STORAGE_DIR):
-            return
-        for fname in os.listdir(STORAGE_DIR):
-            if fname.endswith(".json"):
-                path = os.path.join(STORAGE_DIR, fname)
+        self._root = FolderNode("Root", "")
+        self._load_recursive(STORAGE_DIR, self._root)
+        self._notify()
+
+    def _load_recursive(self, path, parent_node):
+        if not os.path.exists(path): return
+        items = sorted(os.listdir(path))
+        for item in items:
+            item_path = os.path.join(path, item)
+            rel_path = os.path.relpath(item_path, STORAGE_DIR)
+            if os.path.isdir(item_path):
+                folder = FolderNode(item, rel_path, parent_node)
+                parent_node.children.append(folder)
+                self._load_recursive(item_path, folder)
+            elif item.endswith(".json"):
                 try:
-                    with open(path, "r") as f:
+                    with open(item_path, "r") as f:
                         data = json.load(f)
                     wf = WorkflowModel.from_dict(data)
-                    self._workflows.append(wf)
+                    wf._rel_path = rel_path
+                    print("[FlipFlow] Loaded workflow: %s at %s" % (wf.name, wf._rel_path))
+                    parent_node.children.append(wf)
                 except Exception:
                     pass
-        self._notify()
 
-    def save_workflow(self, workflow):
-        self._ensure_storage_dir()
-        safe_name = re.sub(r'[^\w\-]', '_', workflow.name)
-        path = os.path.join(STORAGE_DIR, safe_name + ".json")
-        with open(path, "w") as f:
-            json.dump(workflow.to_dict(), f, indent=2)
-
-    def save_all(self):
-        for wf in self._workflows:
-            self.save_workflow(wf)
-
-    def get_workflows(self):
-        return list(self._workflows)
+    def get_root(self):
+        return self._root
 
     def get_workflow(self, name):
-        for wf in self._workflows:
-            if wf.name == name:
-                return wf
+        """Find a workflow by name (recursive search)."""
+        return self._find_workflow_recursive(self._root, name)
+
+    def _find_workflow_recursive(self, node, name):
+        for child in node.children:
+            if not isinstance(child, FolderNode):
+                if child.name == name:
+                    return child
+            else:
+                res = self._find_workflow_recursive(child, name)
+                if res: return res
         return None
 
-    def create_workflow(self, name="New Workflow"):
-        counter = 1
-        base_name = name
-        while self.get_workflow(name):
-            name = "%s (%d)" % (base_name, counter)
-            counter += 1
-        wf = WorkflowModel(name=name)
-        self._workflows.append(wf)
-        self.save_workflow(wf)
-        self._notify()
-        return wf
+    def save_workflow(self, workflow, folder_rel_path=""):
+        self._ensure_storage_dir()
+        if not hasattr(workflow, "_rel_path") or not workflow._rel_path:
+            safe_name = re.sub(r'[^\w\-]', '_', workflow.name)
+            workflow._rel_path = os.path.join(folder_rel_path, safe_name + ".json")
+        
+        abs_path = os.path.join(STORAGE_DIR, workflow._rel_path)
+        curr_dir = os.path.dirname(abs_path)
+        if not os.path.exists(curr_dir):
+            os.makedirs(curr_dir)
+            
+        with open(abs_path, "w") as f:
+            json.dump(workflow.to_dict(), f, indent=2)
 
     def delete_workflow(self, workflow):
-        if workflow in self._workflows:
-            self._workflows.remove(workflow)
-            safe_name = re.sub(r'[^\w\-]', '_', workflow.name)
-            path = os.path.join(STORAGE_DIR, safe_name + ".json")
-            if os.path.exists(path):
-                os.remove(path)
-            self._notify()
+        if hasattr(workflow, "_rel_path"):
+            abs_path = os.path.join(STORAGE_DIR, workflow._rel_path)
+            if os.path.exists(abs_path):
+                os.remove(abs_path)
+        self.load_all()
 
     def rename_workflow(self, workflow, new_name):
-        old_safe = re.sub(r'[^\w\-]', '_', workflow.name)
-        old_path = os.path.join(STORAGE_DIR, old_safe + ".json")
-        if os.path.exists(old_path):
-            os.remove(old_path)
+        # We need to rename the file too
+        old_path = os.path.join(STORAGE_DIR, workflow._rel_path)
         workflow.name = new_name
+        
+        safe_name = re.sub(r'[^\w\-]', '_', new_name)
+        new_rel = os.path.join(os.path.dirname(workflow._rel_path), safe_name + ".json")
+        new_path = os.path.join(STORAGE_DIR, new_rel)
+        
+        if os.path.exists(old_path):
+            os.rename(old_path, new_path)
+        
+        workflow._rel_path = new_rel
         self.save_workflow(workflow)
-        self._notify()
+        self.load_all()
+
+    def move_item(self, item, target_folder_rel):
+        """Moves a workflow or folder to a new folder."""
+        self._ensure_storage_dir()
+        
+        # Determine source relative path
+        if isinstance(item, WorkflowModel):
+            old_rel = item._rel_path
+        else: # FolderNode - we need to calculate its rel path
+            old_rel = self._get_folder_rel_path(item)
+            
+        if not old_rel: return False
+        
+        old_abs = os.path.join(STORAGE_DIR, old_rel)
+        new_rel = os.path.join(target_folder_rel, os.path.basename(old_rel))
+        new_abs = os.path.join(STORAGE_DIR, new_rel)
+        
+        if os.path.exists(old_abs) and not os.path.exists(new_abs):
+            os.rename(old_abs, new_abs)
+            self.load_all()
+            return True
+        return False
+
+    def _get_folder_rel_path(self, folder_node):
+        parts = []
+        curr = folder_node
+        while curr and curr.parent: # parent is Root (which has parent=None)
+            parts.insert(0, curr.name)
+            curr = curr.parent
+        return os.path.join(*parts) if parts else ""
+
+    def create_workflow(self, name="New Workflow", folder_rel_path=""):
+        wf = WorkflowModel(name=name)
+        self.save_workflow(wf, folder_rel_path)
+        self.load_all()
+        return wf
+
+    def create_folder(self, name, parent_rel_path=""):
+        path = os.path.join(STORAGE_DIR, parent_rel_path, name)
+        if not os.path.exists(path):
+            os.makedirs(path)
+        self.load_all()
 
     def duplicate_workflow(self, workflow):
         data = workflow.to_dict()
         data["name"] = workflow.name + " (Copy)"
         new_wf = WorkflowModel.from_dict(data)
-        counter = 1
-        base = new_wf.name
-        while self.get_workflow(new_wf.name):
-            new_wf.name = "%s %d" % (base, counter)
-            counter += 1
-        self._workflows.append(new_wf)
-        self.save_workflow(new_wf)
-        self._notify()
+        
+        parent_rel = os.path.dirname(workflow._rel_path)
+        self.save_workflow(new_wf, parent_rel)
+        self.load_all()
         return new_wf
 
     def add_listener(self, callback):
@@ -728,169 +789,307 @@ class SelectionListenerWrapper(ListSelectionListener):
     def valueChanged(self, e): self.callback(e)
 
 
+from java.awt.datatransfer import StringSelection, DataFlavor
+
+class TreeTransferHandler(TransferHandler):
+    """Handles Drag-and-Drop for the Workflow Tree."""
+    def __init__(self, panel):
+        self._panel = panel
+
+    def getSourceActions(self, c):
+        return TransferHandler.MOVE
+
+    def createTransferable(self, c):
+        print("[FlipFlow] DnD Start Drag")
+        node = c.getLastSelectedPathComponent()
+        if node and not node.isRoot():
+            path = self._panel._calculate_rel_path(node)
+            print("[FlipFlow] Dragging path: %s" % path)
+            return StringSelection(path)
+        return None
+
+    def canImport(self, support):
+        if not support.isDataFlavorSupported(DataFlavor.stringFlavor):
+            return False
+        
+        # Must drop on a node
+        loc = support.getDropLocation()
+        path = loc.getPath()
+        if not path: return False
+        
+        target_node = path.getLastPathComponent()
+        target_item = target_node.getUserObject()
+        
+        # Only allow dropping on folders (categories)
+        return isinstance(target_item, FolderNode)
+
+    def importData(self, support):
+        if not self.canImport(support): return False
+        print("[FlipFlow] DnD Import Attempted")
+        try:
+            t = support.getTransferable()
+            source_rel = t.getTransferData(DataFlavor.stringFlavor)
+            
+            loc = support.getDropLocation()
+            target_node = loc.getPath().getLastPathComponent()
+            target_rel = self._panel._calculate_rel_path(target_node)
+            
+            print("[FlipFlow] Moving %s to %s" % (source_rel, target_rel))
+            
+            # Prevent dropping a folder into itself
+            if source_rel == target_rel or target_rel.startswith(source_rel + os.sep):
+                print("[FlipFlow] Invalid DnD: Source is target or parent")
+                return False
+
+            # Perform the move
+            source_abs = os.path.normpath(os.path.join(STORAGE_DIR, source_rel))
+            source_name = os.path.basename(source_abs)
+            target_abs = os.path.normpath(os.path.join(STORAGE_DIR, target_rel, source_name))
+            
+            print("[FlipFlow] Source Abs: %s" % source_abs)
+            print("[FlipFlow] Target Abs: %s" % target_abs)
+            
+            if not source_rel:
+                print("[FlipFlow] Move failed: Source path is empty")
+                return False
+
+            if os.path.exists(source_abs):
+                if not os.path.exists(target_abs):
+                    try:
+                        os.rename(source_abs, target_abs)
+                        print("[FlipFlow] Move successful")
+                        self._panel.refresh()
+                        return True
+                    except Exception as e:
+                        print("[FlipFlow] OS Rename Error: %s" % str(e))
+                        # Fallback for cross-device move if needed (not likely here but good practice)
+                        import shutil
+                        shutil.move(source_abs, target_abs)
+                        self._panel.refresh()
+                        return True
+                else:
+                    print("[FlipFlow] Move failed: Target already exists")
+            else:
+                print("[FlipFlow] Move failed: Source does not exist")
+        except Exception as e:
+            print("[FlipFlow] DnD Error: %s" % str(e))
+            traceback.print_exc()
+            
+        return False
+
+
+class FlowTreeCellRenderer(DefaultTreeCellRenderer):
+    def getTreeCellRendererComponent(self, tree, value, selected, expanded, leaf, row, hasFocus):
+        c = DefaultTreeCellRenderer.getTreeCellRendererComponent(self, tree, value, selected, expanded, leaf, row, hasFocus)
+        node = value.getUserObject() if hasattr(value, "getUserObject") else None
+        
+        if isinstance(node, FolderNode):
+            self.setIcon(UIManager.getIcon("Tree.closedIcon"))
+        elif isinstance(node, WorkflowModel):
+            self.setIcon(UIManager.getIcon("Tree.leafIcon"))
+        
+        self.setText(str(node.name) if node else "")
+        
+        # Transparent background to follow theme
+        self.setBackgroundNonSelectionColor(COLOR_BG)
+        
+        if selected:
+            self.setForeground(COLOR_FG_SELECTED)
+            self.setBackgroundSelectionColor(COLOR_ACCENT)
+        else:
+            self.setForeground(COLOR_FG)
+            
+        return c
+
+
 class FlowListPanel(JPanel):
     def __init__(self, manager, on_select_callback):
         self.setLayout(BorderLayout())
         self._manager = manager
         self._on_select = on_select_callback
-        self._list_model = DefaultListModel()
-
-        self._list = JList(self._list_model)
-        self._list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
-        self._selection_listener = SelectionListenerWrapper(self._list_selected)
-        self._list.addListSelectionListener(self._selection_listener)
-
-        scroll = JScrollPane(self._list)
+        
+        self._tree_root = DefaultMutableTreeNode(manager.get_root())
+        self._tree_model = DefaultTreeModel(self._tree_root)
+        self._tree = JTree(self._tree_model)
+        self._tree.setCellRenderer(FlowTreeCellRenderer())
+        self._tree.setOpaque(False)
+        self._tree.setBackground(Color(0,0,0,0))
+        self._tree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION)
+        
+        self._tree.addTreeSelectionListener(lambda e: self._tree_selected(e))
+        
+        # DnD
+        self._tree.setDragEnabled(True)
+        self._tree.setDropMode(DropMode.ON)
+        self._tree.setTransferHandler(TreeTransferHandler(self))
+        
+        scroll = JScrollPane(self._tree)
         scroll.setBorder(BorderFactory.createTitledBorder("Workflows"))
         self.add(scroll, BorderLayout.CENTER)
 
         # Buttons
-        btn_panel = JPanel(GridLayout(3, 2, 2, 2))
+        btn_panel = JPanel(GridLayout(4, 2, 2, 2))
         btn_panel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5))
 
-        btn_new = JButton("+ New", actionPerformed=self._new_flow)
-        btn_dup = JButton("Duplicate", actionPerformed=self._dup_flow)
-        btn_del = JButton("Delete", actionPerformed=self._del_flow)
-        btn_ren = JButton("Rename", actionPerformed=self._ren_flow)
-        btn_imp = JButton("Import", actionPerformed=self._import_workflow)
-        btn_exp = JButton("Export", actionPerformed=self._export_workflow)
+        btn_new_wf = JButton("+ New", actionPerformed=self._new_wf)
+        btn_new_f = JButton("+ Folder", actionPerformed=self._new_folder)
+        btn_dup = JButton("Duplicate", actionPerformed=self._dup_wf)
+        btn_del = JButton("Delete", actionPerformed=self._del_item)
+        btn_ren = JButton("Rename", actionPerformed=self._ren_item)
+        btn_exp = JButton("Export", actionPerformed=self._export_wf)
+        btn_imp = JButton("Import", actionPerformed=self._import_wf)
+        btn_sync = JButton("Sync", actionPerformed=lambda e: self.refresh())
 
-        btn_panel.add(btn_new)
-        btn_panel.add(btn_dup)
+        btn_panel.add(btn_new_wf)
+        btn_panel.add(btn_new_f)
         btn_panel.add(btn_ren)
+        btn_panel.add(btn_dup)
         btn_panel.add(btn_del)
-        btn_panel.add(btn_imp)
         btn_panel.add(btn_exp)
+        btn_panel.add(btn_imp)
+        btn_panel.add(btn_sync)
 
         self.add(btn_panel, BorderLayout.SOUTH)
         self.refresh()
 
     def refresh(self):
-        self._list.removeListSelectionListener(self._selection_listener)
-        try:
-            selected = self._list.getSelectedValue()
-            self._list_model.clear()
-            for wf in self._manager.get_workflows():
-                self._list_model.addElement(wf.name)
-            if selected:
-                self._list.setSelectedValue(selected, True)
-        finally:
-            self._list.addListSelectionListener(self._selection_listener)
+        self._manager.load_all()
+        self._tree_root.removeAllChildren()
+        self._build_tree(self._manager.get_root(), self._tree_root)
+        self._tree_model.reload()
+        # Expand all by default
+        for i in range(self._tree.getRowCount()):
+            self._tree.expandRow(i)
 
-    def _list_selected(self, event):
-        if not event.getValueIsAdjusting():
-            name = self._list.getSelectedValue()
-            if name:
-                wf = self._manager.get_workflow(name)
-                self._on_select(wf)
+    def _build_tree(self, manager_node, tree_node):
+        for child in manager_node.children:
+            new_node = DefaultMutableTreeNode(child)
+            tree_node.add(new_node)
+            if isinstance(child, FolderNode):
+                self._build_tree(child, new_node)
 
-    def _new_flow(self, event):
+    def _tree_selected(self, event):
+        path = event.getPath()
+        node = path.getLastPathComponent()
+        item = node.getUserObject()
+        if isinstance(item, WorkflowModel):
+            self._on_select(item)
+
+    def _get_selected_node(self):
+        return self._tree.getLastSelectedPathComponent()
+
+    def _get_selected_item(self):
+        node = self._get_selected_node()
+        return node.getUserObject() if node else None
+
+    def _get_parent_rel_path(self, node):
+        if not node: return ""
+        item = node.getUserObject()
+        if isinstance(item, FolderNode):
+            # If a folder is selected, new items go inside it
+            return self._calculate_rel_path(node)
+        else:
+            # If a workflow is selected, new items go in its parent folder
+            parent = node.getParent()
+            return self._calculate_rel_path(parent) if parent else ""
+
+    def _calculate_rel_path(self, node):
+        if not node or node.isRoot(): return ""
+        item = node.getUserObject()
+        return item._rel_path if hasattr(item, "_rel_path") else ""
+
+    def _new_wf(self, event):
+        node = self._get_selected_node()
+        rel_path = self._get_parent_rel_path(node)
         name = JOptionPane.showInputDialog(self, "Workflow Name:")
         if name:
-            wf = self._manager.create_workflow(name)
+            self._manager.create_workflow(name, rel_path)
             self.refresh()
-            self._list.setSelectedValue(wf.name, True)
 
-    def _dup_flow(self, event):
-        name = self._list.getSelectedValue()
+    def _new_folder(self, event):
+        node = self._get_selected_node()
+        rel_path = self._get_parent_rel_path(node)
+        name = JOptionPane.showInputDialog(self, "Folder Name:")
         if name:
-            wf = self._manager.get_workflow(name)
-            new_wf = self._manager.duplicate_workflow(wf)
+            self._manager.create_folder(name, rel_path)
             self.refresh()
-            self._list.setSelectedValue(new_wf.name, True)
 
-    def _del_flow(self, event):
-        name = self._list.getSelectedValue()
-        if name:
-            res = JOptionPane.showConfirmDialog(self, "Delete workflow '%s'?" % name)
-            if res == JOptionPane.YES_OPTION:
-                wf = self._manager.get_workflow(name)
-                self._manager.delete_workflow(wf)
+    def _dup_wf(self, event):
+        item = self._get_selected_item()
+        if isinstance(item, WorkflowModel):
+            self._manager.duplicate_workflow(item)
+            self.refresh()
+
+    def _del_item(self, event):
+        item = self._get_selected_item()
+        if item and not isinstance(item, FolderNode): # Root or regular folder? Just check if it's Root
+            if JOptionPane.showConfirmDialog(self, "Delete '%s'?" % item.name) == JOptionPane.YES_OPTION:
+                if isinstance(item, WorkflowModel):
+                    self._manager.delete_workflow(item)
+                self.refresh()
+        elif isinstance(item, FolderNode) and item.parent: # Don't delete Root
+             if JOptionPane.showConfirmDialog(self, "Delete folder '%s' and ALL contents?" % item.name) == JOptionPane.YES_OPTION:
+                # Cleanup FS
+                path = os.path.join(STORAGE_DIR, self._calculate_rel_path(self._get_selected_node()))
+                if os.path.exists(path):
+                    import shutil
+                    shutil.rmtree(path)
                 self.refresh()
 
-    def _import_workflow(self, event):
+    def _ren_item(self, event):
+        item = self._get_selected_item()
+        if item and (not isinstance(item, FolderNode) or item.parent):
+            new_name = JOptionPane.showInputDialog(self, "New Name:", item.name)
+            if new_name and new_name != item.name:
+                if isinstance(item, WorkflowModel):
+                    self._manager.rename_workflow(item, new_name)
+                else:
+                    # Rename folder on FS
+                    node = self._get_selected_node()
+                    old_path = os.path.join(STORAGE_DIR, self._calculate_rel_path(node))
+                    new_path = os.path.join(os.path.dirname(old_path), new_name)
+                    if os.path.exists(old_path):
+                        os.rename(old_path, new_path)
+                self.refresh()
+
+    def _import_wf(self, event):
         try:
             chooser = JFileChooser()
             chooser.setDialogTitle("Import Workflow")
             chooser.setFileFilter(FileNameExtensionFilter("JSON Files (*.json)", ["json"]))
-            res = chooser.showOpenDialog(self)
-            if res == JFileChooser.APPROVE_OPTION:
+            if chooser.showOpenDialog(self) == JFileChooser.APPROVE_OPTION:
                 f = chooser.getSelectedFile()
-                try:
-                    with open(f.getAbsolutePath(), 'r') as fp:
-                        data = json.load(fp)
-                    new_wf = WorkflowModel.from_dict(data)
-                    
-                    # Check if it already exists by name
-                    base_name = new_wf.name
-                    counter = 1
-                    while self._manager.get_workflow(new_wf.name):
-                        new_wf.name = "%s (Imported %d)" % (base_name, counter)
-                        counter += 1
-                    
-                    self._manager._workflows.append(new_wf)
-                    self._manager.save_workflow(new_wf)
-                    self.refresh()
-                    self._list.setSelectedValue(new_wf.name, True)
-                    JOptionPane.showMessageDialog(self, "Workflow '%s' imported successfully." % new_wf.name)
-                except Exception as e:
-                    JOptionPane.showMessageDialog(self, "Error importing workflow: %s" % str(e))
-                    traceback.print_exc()
-        except Exception as e:
-            print("[FlipFlow] Import Error: %s" % str(e))
-            traceback.print_exc()
-
-    def _export_workflow(self, event):
-        try:
-            name = self._list.getSelectedValue()
-            if not name:
-                JOptionPane.showMessageDialog(self, "Select a workflow to export.")
-                return
+                with open(f.getAbsolutePath(), 'r') as fp:
+                    data = json.load(fp)
+                new_wf = WorkflowModel.from_dict(data)
                 
-            wf = self._manager.get_workflow(name)
+                # Deduplicate name if exists in current view
+                base_name = new_wf.name
+                counter = 1
+                while self._manager.get_workflow(new_wf.name):
+                    new_wf.name = "%s (Imported %d)" % (base_name, counter)
+                    counter += 1
+                
+                node = self._get_selected_node()
+                rel_path = self._get_parent_rel_path(node)
+                self._manager.save_workflow(new_wf, rel_path)
+                self.refresh()
+        except Exception as e:
+            JOptionPane.showMessageDialog(self, "Error importing: " + str(e))
+
+    def _export_wf(self, event):
+        item = self._get_selected_item()
+        if isinstance(item, WorkflowModel):
             chooser = JFileChooser()
             chooser.setDialogTitle("Export Workflow")
-            
-            # Suggest a filename
-            safe_name = re.sub(r'[^\w\-]', '_', wf.name)
-            home_dir = os.path.expanduser("~")
-            suggested_file = File(os.path.join(home_dir, "%s.json" % safe_name))
-            chooser.setSelectedFile(suggested_file)
-            chooser.setFileFilter(FileNameExtensionFilter("JSON Files (*.json)", ["json"]))
-            
-            res = chooser.showSaveDialog(self)
-            if res == JFileChooser.APPROVE_OPTION:
-                f = chooser.getSelectedFile()
-                path = f.getAbsolutePath()
-                if not path.lower().endswith(".json"):
-                    path += ".json"
-                
-                try:
-                    # Check for overwrite if not selected via dialog's own check (some platforms differ)
-                    if os.path.exists(path):
-                        confirm = JOptionPane.showConfirmDialog(self, "File exists. Overwrite?", "Confirm Save", JOptionPane.YES_NO_OPTION)
-                        if confirm != JOptionPane.YES_OPTION:
-                            return
-
-                    with open(path, 'w') as fp:
-                        json.dump(wf.to_dict(), fp, indent=4)
-                    JOptionPane.showMessageDialog(self, "Workflow exported successfully to:\n%s" % path)
-                except Exception as e:
-                    JOptionPane.showMessageDialog(self, "Error exporting workflow: %s" % str(e))
-                    traceback.print_exc()
-        except Exception as e:
-            print("[FlipFlow] Export Error: %s" % str(e))
-            traceback.print_exc()
-
-    def _ren_flow(self, event):
-        name = self._list.getSelectedValue()
-        if name:
-            new_name = JOptionPane.showInputDialog(self, "New Name:", name)
-            if new_name and new_name != name:
-                wf = self._manager.get_workflow(name)
-                self._manager.rename_workflow(wf, new_name)
-                self.refresh()
-                self._list.setSelectedValue(new_name, True)
+            safe_name = re.sub(r'[^\w\-]', '_', item.name)
+            chooser.setSelectedFile(File(os.path.join(os.path.expanduser("~"), safe_name + ".json")))
+            if chooser.showSaveDialog(self) == JFileChooser.APPROVE_OPTION:
+                path = chooser.getSelectedFile().getAbsolutePath()
+                if not path.lower().endswith(".json"): path += ".json"
+                with open(path, 'w') as f:
+                    json.dump(item.to_dict(), f, indent=4)
+                JOptionPane.showMessageDialog(self, "Exported to: " + path)
 
 
 

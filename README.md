@@ -9,17 +9,23 @@
 
 ## ✨ Features
 
+### 📂 Organized Workflow Management
+- **Hierarchical Categories**: Organize your workflows into folders and subfolders for a tidy workspace.
+- **Drag-and-Drop**: Easily move workflows or entire categories between folders with native mouse interactions.
+- **Expand/Collapse**: Keep your sidebar clean by collapsing inactive categories.
+- **Filesystem Sync**: All changes in the UI are reflected instantly in your `~/.flipflow/` directory.
+
 ### 🚀 Automation & Chaining
 - **Sequential Execution**: Run a series of requests with a single click.
 - **Dynamic Variable Substitution**: Use `{{variable_name}}` anywhere in your request (URL, Headers, Body, Host). 
-  - **Smart Substitution**: Variables are case-insensitive and support automatic whitespace trimming (e.g., `{{ var }}`).
+  - **Smart Substitution**: Variables are case-insensitive and support automatic whitespace trimming.
 - **Conditional Post-Actions**: Trigger secondary workflows based on response status (e.g., "Run Login Flow if 401").
 
 ### 🔍 Protocol & Reliability
 - **Auto Content-Length**: Automatically recalculates the `Content-Length` header if your request body changes—say goodbye to mysterious 400 errors!
 - **CRLF Normalization**: Ensures all requests use proper `\r\n` line endings for maximum server compatibility.
-- **Response Inspector**: A dedicated tab to view raw Request and Response data for every step in an execution.
-- **Auto-clear Logs**: Option to automatically clear logs and inspector data before each execution for a clean workspace.
+- **Response Inspector**: A dedicated tab to view raw Request and Response data for every step.
+- **Auto-clear Logs**: Option to clear logs and inspector data before each execution for a clean workspace.
 
 ### 🧬 Powerful Extraction
 Extract values from any part of the HTTP response using multiple methods:
@@ -28,9 +34,9 @@ Extract values from any part of the HTTP response using multiple methods:
 - **Headers**: Grab values from specific response headers (e.g., `Authorization`).
 - **Cookies**: Automatically extract session values from `Set-Cookie`.
 
-### 📤 Import & Export
+### 📥 Import & Export
 - **JSON Based Sharing**: Export your workflows as `.json` files to share with your team or backup.
-- **Seamless Import**: Import workflows with automatic collision handling (deduplication of names).
+- **Seamless Import**: Import workflows into your currently selected category with automatic conflict resolution.
 - **Native Experience**: Integrated with system file dialogs.
 
 ---
@@ -53,9 +59,10 @@ Extract values from any part of the HTTP response using multiple methods:
 
 ## 📖 Quick Start
 
-### 1. Create your first Flow
-- Click **[+] New** in the left panel.
-- Rename your workflow by double-clicking it or using the `Rename` button.
+### 1. Organize Your Workspace
+- **[+] Folder**: Create a new category for your project.
+- **[+] New**: Create a specific workflow inside the selected category.
+- **Sync**: Use the **Sync** button to reload the tree if you've manually edited files in your storage directory.
 
 ### 2. Add Steps
 - **Import from Burp**: Right-click any request in **Proxy History**, **Repeater**, or **Intruder** → `Send to FlipFlow`. 
@@ -86,6 +93,7 @@ Add `X-FlipFlow-Execute-Before: MyAuthFlow` to any manual request. The extension
 
 ## 💾 Storage & Persistence
 - Flows are saved automatically to your home directory: `~/.flipflow/`.
+- The storage structure mirrors your UI hierarchy (folders on disk = categories in UI).
 - Workflows are stored as human-readable `.json` files.
 
 ---
